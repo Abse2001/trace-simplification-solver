@@ -167,15 +167,14 @@ const canMoveViaTo = (
   // Moving a via also bends its attached wires, far beyond the via's short path.
   const atVia = (p: { x: number; y: number }) =>
     p.x === viaToRemove.x && p.y === viaToRemove.y
-  for (let i = 1; i < route.route.length; i++) {
+  for (
+    let i = 1;
+    context.traceMargin !== undefined && i < route.route.length;
+    i++
+  ) {
     const a = route.route[i - 1]!,
       b = route.route[i]!
-    if (
-      context.traceMargin === undefined ||
-      a.z !== b.z ||
-      (!atVia(a) && !atVia(b))
-    )
-      continue
+    if (a.z !== b.z || (!atVia(a) && !atVia(b))) continue
     const moved = (p: typeof a) =>
       atVia(p) ? { ...p, x: viaKeep.x, y: viaKeep.y } : p
     segments.push({
