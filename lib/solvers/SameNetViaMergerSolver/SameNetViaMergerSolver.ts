@@ -25,7 +25,7 @@ export interface SameNetViaMergerSolverInput {
   outline?: Array<{ x: number; y: number }>
   /** Prevent transition clusters that touch a route endpoint from moving. */
   preserveRouteEndpoints?: boolean
-  /** Minimum copper gap to other nets; defaults to zero. */
+  /** Opt into clearance-preserving final cleanup instead of topology merging. */
   traceMargin?: number
 }
 
@@ -130,7 +130,7 @@ const canMoveViaTo = (
     mergedViaHdRoutes: HighDensityRoute[]
     hdRouteSHI: HighDensityRouteSpatialIndex
     obstacleSHI: ObstacleSpatialHashIndex
-    traceMargin: number
+    traceMargin?: number
     proposedRoute?: HighDensityRoute
     netByConnectionName?: ReadonlyMap<string, string>
   },
@@ -170,7 +170,12 @@ const canMoveViaTo = (
   for (let i = 1; i < route.route.length; i++) {
     const a = route.route[i - 1]!,
       b = route.route[i]!
-    if (a.z !== b.z || (!atVia(a) && !atVia(b))) continue
+    if (
+      context.traceMargin === undefined ||
+      a.z !== b.z ||
+      (!atVia(a) && !atVia(b))
+    )
+      continue
     const moved = (p: typeof a) =>
       atVia(p) ? { ...p, x: viaKeep.x, y: viaKeep.y } : p
     segments.push({
@@ -186,10 +191,10 @@ const canMoveViaTo = (
     const conflictingRoutes = context.hdRouteSHI.getConflictingRoutesForSegment(
       start,
       end,
-      traceThickness / 2 + context.traceMargin,
+      traceThickness / 2 + (context.traceMargin ?? 0),
     )
 
-    for (const { conflictingRoute } of conflictingRoutes) {
+    for (const { conflictingRoute, distance } of conflictingRoutes) {
       if (conflictingRoute.connectionName === route.connectionName) continue
       if (
         tryGetNetForRoute(
@@ -200,7 +205,11 @@ const canMoveViaTo = (
       )
         continue
 
-      return false
+      if (
+        context.traceMargin !== undefined ||
+        distance < traceThickness / 2 + conflictingRoute.traceThickness / 2
+      )
+        return false
     }
 
     const segmentBox = {
@@ -374,6 +383,8 @@ export class SameNetViaMergerSolver extends BaseSolver {
   }
 
   private getOffendingViaGroupsBatch(): Array<{ keep: Via; remove: Via[] }> {
+    const groups: Array<{ keep: Via; remove: Via[] }> = []
+    const touchedViaKeys = new Set<string>()
     const candidateGroups: Array<{ keep: Via; remove: Via[] }> = []
 
     for (const viasInNet of this.viasByNet.values()) {
@@ -433,13 +444,21 @@ export class SameNetViaMergerSolver extends BaseSolver {
               if (squaredDistance === 0) continue
 
               if (
+                this.input.traceMargin === undefined &&
+                squaredDistance <= directOverlapDistance * directOverlapDistance
+              ) {
+                remove.push(candidate)
+                continue
+              }
+
+              if (
                 squaredDistance <= nearMergeDistance * nearMergeDistance &&
                 canMoveViaTo(candidate, keep, {
                   connMap: this.connMap,
                   mergedViaHdRoutes: this.mergedViaHdRoutes,
                   hdRouteSHI: this.hdRouteSHI,
                   obstacleSHI: this.obstacleSHI,
-                  traceMargin: this.input.traceMargin ?? 0,
+                  traceMargin: this.input.traceMargin,
                   netByConnectionName: this.netByConnectionName,
                 })
               ) {
@@ -480,7 +499,19 @@ export class SameNetViaMergerSolver extends BaseSolver {
       return a.keep.routeIndex - b.keep.routeIndex
     })
 
-    return candidateGroups
+    if (this.input.traceMargin !== undefined) return candidateGroups
+    for (const candidateGroup of candidateGroups) {
+      const keepKey = this.getViaLocationKey(candidateGroup.keep)
+      if (touchedViaKeys.has(keepKey)) continue
+      const remove = candidateGroup.remove.filter(
+        (via) => !touchedViaKeys.has(this.getViaLocationKey(via)),
+      )
+      if (remove.length === 0) continue
+      groups.push({ keep: candidateGroup.keep, remove })
+      touchedViaKeys.add(keepKey)
+      for (const via of remove) touchedViaKeys.add(this.getViaLocationKey(via))
+    }
+    return groups
   }
 
   private moveViaTo(viaToRemove: Via, viaKeep: Via, rebuildVias = true): void {
@@ -558,6 +589,19 @@ export class SameNetViaMergerSolver extends BaseSolver {
   }
 
   _step(): void {
+    if (this.input.traceMargin !== undefined) {
+      const next = this.getClearancePreservingMergeCandidates().next()
+      if (next.done) {
+        this.solved = true
+        return
+      }
+      this.mergedViaHdRoutes = next.value.routes
+      this.rebuildVias()
+      this.hdRouteSHI = this.createHdRouteSpatialIndex()
+      this.stats.mergedViaCount =
+        (this.stats.mergedViaCount ?? 0) + next.value.mergedViaCount
+      return
+    }
     const groups = this.getOffendingViaGroupsBatch()
 
     if (groups.length === 0) {
@@ -565,7 +609,27 @@ export class SameNetViaMergerSolver extends BaseSolver {
       return
     }
 
+    let mergedViaCount = 0
     for (const group of groups) {
+      for (const via of group.remove) {
+        this.moveViaTo(via, group.keep, false)
+        mergedViaCount++
+      }
+    }
+    this.rebuildVias()
+    this.hdRouteSHI = this.createHdRouteSpatialIndex()
+    this.stats.mergedViaGroups = groups.length
+    this.stats.mergedViaCount = mergedViaCount
+  }
+
+  /** Independent proposals against the current copper, without committing them. */
+  *getClearancePreservingMergeCandidates(): Generator<{
+    routes: HighDensityRoute[]
+    mergedViaCount: number
+  }> {
+    if (this.input.traceMargin === undefined)
+      throw new Error("Clearance-preserving candidates require traceMargin")
+    for (const group of this.getOffendingViaGroupsBatch()) {
       const previous = this.mergedViaHdRoutes
       this.mergedViaHdRoutes = structuredClone(previous)
       for (const via of group.remove) this.moveViaTo(via, group.keep, false)
@@ -576,23 +640,14 @@ export class SameNetViaMergerSolver extends BaseSolver {
           proposedRoute: this.mergedViaHdRoutes[via.routeIndex],
           hdRouteSHI: this.hdRouteSHI,
           obstacleSHI: this.obstacleSHI,
-          traceMargin: this.input.traceMargin ?? 0,
+          traceMargin: this.input.traceMargin,
           netByConnectionName: this.netByConnectionName,
         }),
       )
-      if (!valid) {
-        this.mergedViaHdRoutes = previous
-        continue
-      }
-      // The next step checks against this group's accepted geometry.
-      this.rebuildVias()
-      this.hdRouteSHI = this.createHdRouteSpatialIndex()
-      this.stats.mergedViaGroups = (this.stats.mergedViaGroups ?? 0) + 1
-      this.stats.mergedViaCount =
-        (this.stats.mergedViaCount ?? 0) + group.remove.length
-      return
+      const routes = this.mergedViaHdRoutes
+      this.mergedViaHdRoutes = previous
+      if (valid) yield { routes, mergedViaCount: group.remove.length }
     }
-    this.solved = true
   }
 
   getMergedViaHdRoutes(): HighDensityRoute[] | null {
