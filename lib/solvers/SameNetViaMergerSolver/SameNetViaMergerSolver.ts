@@ -453,6 +453,8 @@ export class SameNetViaMergerSolver extends BaseSolver {
 
               if (
                 squaredDistance <= nearMergeDistance * nearMergeDistance &&
+                (this.input.traceMargin === undefined ||
+                  candidate.diameter <= keep.diameter) &&
                 canMoveViaTo(candidate, keep, {
                   connMap: this.connMap,
                   mergedViaHdRoutes: this.mergedViaHdRoutes,
