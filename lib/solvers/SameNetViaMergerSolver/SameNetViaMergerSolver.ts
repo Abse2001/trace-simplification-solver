@@ -429,10 +429,8 @@ export class SameNetViaMergerSolver extends BaseSolver {
               const nearMergeDistance =
                 directOverlapDistance * NEAR_VIA_MERGE_DISTANCE_MULTIPLIER
 
-              if (squaredDistance === 0) {
-                if (!keep.mutable) remove.push(candidate)
-                continue
-              }
+              // Co-located route entries already describe one physical via.
+              if (squaredDistance === 0) continue
 
               if (
                 squaredDistance <= nearMergeDistance * nearMergeDistance &&
@@ -543,10 +541,11 @@ export class SameNetViaMergerSolver extends BaseSolver {
       route[routePointIndex] = { ...point, x: viaKeep.x, y: viaKeep.y }
     }
 
-    routeToUpdate.vias = routeToUpdate.vias.flatMap((vx) => {
+    // Retain each route's layer transition when sharing an immutable via.
+    routeToUpdate.vias = routeToUpdate.vias.map((vx) => {
       if (vx.x !== viaToRemove.x || vx.y !== viaToRemove.y) return vx
       replacedVia = true
-      return viaKeep.mutable ? [{ x: viaKeep.x, y: viaKeep.y }] : []
+      return { x: viaKeep.x, y: viaKeep.y }
     })
     if (!replacedVia) {
       throw new Error(
