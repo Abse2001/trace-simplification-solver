@@ -49,6 +49,6 @@ test("Game Boy via removal produces repeatable route geometry", async (): Promis
   expect(outputs[1]).toEqual(outputs[0])
   await Bun.write(
     new URL("../tmp/gameboy-via-removal-routes.json", import.meta.url),
-    JSON.stringify(outputs[0], null, 2),
+    `${JSON.stringify(outputs[0], null, 2)}\n`,
   )
 })
